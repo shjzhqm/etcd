@@ -1,0 +1,82 @@
+# 最终的、持久化的、带 UI 的 docker-compose.yml (v3)
+services:
+  etcd:
+    image: gcr.io/etcd-development/etcd:v3.5.12
+    command: >
+      etcd
+      --name=etcd
+      --data-dir=/etcd-data
+      --advertise-client-urls=http://0.0.0.0:2379
+      --listen-client-urls=http://0.0.0.0:2379
+      --listen-peer-urls=http://0.0.0.0:2380
+      --initial-advertise-peer-urls=http://0.0.0.0:2380
+      --initial-cluster=etcd=http://0.0.0.0:2380
+      --initial-cluster-state=new
+    environment:
+      - ETCD_API=3
+    volumes:
+      - etcd-data:/etcd-data  # <-- 持久化
+    ports:
+      - "2379:2379"
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - minio-data:/data  # <-- 持久化
+    restart: unless-stopped
+
+  milvus:
+    image: milvusdb/milvus:v2.4.7
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      ETCD_ENDPOINTS: etcd:2379    # <-- 告诉 Milvus 去用外部 etcd
+      MINIO_ADDRESS: minio:9000   # <-- 告诉 Milvus 去用外部 minio
+
+    # --- vvvvvv 关键修复：加回了这一行 vvvvvv ---
+    # 告诉 Milvus 以“一体机”模式启动，但使用上面的外部存储
+    command: ["milvus", "run", "standalone"]
+    # --- ^^^^^^ 关键修复 ^^^^^^ ---
+
+    ports:
+      - "19530:19530"               # gRPC (给 Python)
+    restart: unless-stopped
+    # Milvus 服务本身不需要 volume，因为它把数据全存到了 etcd 和 minio 里
+
+  # --- 添加 Attu (Web UI) ---
+  attu:
+    # 使用 v2.4.x 对应的 Attu v2.4.1 版本
+    image: zilliz/attu:v2.4.1
+    depends_on:
+      - milvus # 等待 milvus 启动
+    ports:
+      - "8000:3000" # 映射你本地的 8000 端口
+    environment:
+      # 告诉 Attu 容器去连接名为 'milvus' 的容器的 19530 端口
+      MILVUS_URL: milvus:19530
+    restart: unless-stopped
+
+volumes:
+  etcd-data:
+  minio-data:
